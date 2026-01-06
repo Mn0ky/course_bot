@@ -1,0 +1,7 @@
+# created by virtualenv automatically
+/lib
+/bin
+CACHEDIR.TAG
+pyvenv.cfg
+config_dump.txt
+srs-owlexpress.kennesaw.edu.har
