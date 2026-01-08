@@ -1,7 +1,11 @@
 # created by virtualenv automatically
 /lib
 /bin
+/Scripts
+/msedgedriver.exe
 CACHEDIR.TAG
 pyvenv.cfg
 config_dump.txt
 srs-owlexpress.kennesaw.edu.har
+PAD_LOCAL_FLOW.md
+run_log.txt

@@ -1,6 +1,7 @@
 import time
 import json
 import os
+import platform
 import argparse
 import requests
 from selenium import webdriver
@@ -44,8 +45,16 @@ def send_discord_buffer():
 
 def get_edge_user_data_dir():
     home = os.path.expanduser("~")
-    # Tries to guess the location. User might need to close Edge.
-    return os.path.join(home, "Library", "Application Support", "Microsoft Edge")
+    system = platform.system()
+    # Tries to guess the default location per platform
+    if system == "Darwin":
+        return os.path.join(home, "Library", "Application Support", "Microsoft Edge")
+    elif system == "Windows":
+        localappdata = os.environ.get("LOCALAPPDATA", os.path.join(home, "AppData", "Local"))
+        return os.path.join(localappdata, "Microsoft", "Edge", "User Data")
+    else:
+        # Linux or others
+        return os.path.join(home, ".config", "microsoft-edge")
 
 def find_profile_directory(user_data_dir, target_email):
     print(f"Searching for profile with email: {target_email} in {user_data_dir}")
@@ -76,6 +85,8 @@ def fetch_config():
     parser = argparse.ArgumentParser(description="SRS Config Fetcher")
     parser.add_argument("--term", help="Term to select (e.g., 'Spring 2026')")
     parser.add_argument("--debug-port", help="Port of existing Edge instance (e.g. 9222)")
+    parser.add_argument("--head", action="store_true", help="Launch browser in visible (non-headless) mode")
+    parser.add_argument("--edge-driver", help="Path to msedgedriver executable (e.g. 'D:\\path\\msedgedriver.exe')")
     args = parser.parse_args()
     
     # If no term is provided via args, ask for it
@@ -91,10 +102,6 @@ def fetch_config():
     profile_email = os.environ.get("EDGE_PROFILE_EMAIL", "")
     profile_dir = find_profile_directory(user_data_dir, profile_email) if profile_email else "Default"
     
-    # Generate the command the user can run
-    edge_binary = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
-    debug_cmd = f"'{edge_binary}' --remote-debugging-port=9222 --user-data-dir='{user_data_dir}' --profile-directory='{profile_dir}'"
-    
     options = EdgeOptions()
     
     if args.debug_port:
@@ -102,14 +109,22 @@ def fetch_config():
         options.add_experimental_option("debuggerAddress", f"127.0.0.1:{args.debug_port}")
     else:
         print("NOTE: Please ensure all Microsoft Edge windows are CLOSED before proceeding, or the driver may fail to launch with your profile.")
-        print("\n[TIP] To run this bot alongside your personal browsing:")
-        print("1. Close ALL Edge windows (Cmd+Q).")
-        print(f"2. Run this command in Terminal to launch Edge with automation enabled:")
-        print(f"   {debug_cmd}")
+        print("\n[TIP] To run this bot alongside your personal browsing (examples):")
+        print("1. Close ALL Microsoft Edge windows.")
+        print("2. Launch Edge with remote debugging enabled (examples):")
+        print("   macOS: '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge' --remote-debugging-port=9222 --user-data-dir='~/Library/Application Support/Microsoft Edge' --profile-directory='Default'")
+        print("   Windows: \"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe\" --remote-debugging-port=9222 --user-data-dir=\"%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\" --profile-directory=\"Default\"")
+        print("   Linux: /usr/bin/microsoft-edge --remote-debugging-port=9222 --user-data-dir=\"$HOME/.config/microsoft-edge\" --profile-directory=\"Default\"")
         print("3. Run this bot again with: ./run_bot.sh --debug-port 9222")
+        print("4. Then start the bot with: ./run_bot.sh --webhook <webhook_url> --email <email> --discord-user \"<user_id>\"")
         print("-" * 60 + "\n")
         
-        options.add_argument("--headless=new") # Run in headless mode
+        # Default to headless unless user explicitly requested visible browser
+        if not args.head:
+            print('Launching browser in headless mode (no GUI). To see the browser, use the "--head" option.')
+            options.add_argument("--headless=new")
+        else:
+            print("Launching browser in visible (non-headless) mode as requested (--head).")
         options.add_argument(f"user-data-dir={user_data_dir}")
         options.add_argument(f"profile-directory={profile_dir}") 
     
@@ -117,14 +132,25 @@ def fetch_config():
     
     # Try to launch Edge
     driver_path = None
-    try:
-        print("Attempting to download/update Edge Driver...")
-        driver_path = EdgeChromiumDriverManager().install()
-        service = EdgeService(driver_path)
-    except Exception as e:
-        print(f"Warning: Automated driver download failed ({e}).")
-        print("Attempting to use system-installed 'msedgedriver'...")
-        service = EdgeService() # Falls back to PATH
+    service = None
+
+    # If user passed a driver path, try to use it first
+    if args.edge_driver:
+        if os.path.exists(args.edge_driver):
+            print(f"Using Edge driver provided at: {args.edge_driver}")
+            service = EdgeService(args.edge_driver)
+        else:
+            print(f"Warning: Specified Edge driver not found: {args.edge_driver}. Falling back to auto-download or PATH.")
+
+    if service is None:
+        try:
+            print("Attempting to download/update Edge Driver...")
+            driver_path = EdgeChromiumDriverManager().install()
+            service = EdgeService(driver_path)
+        except Exception as e:
+            print(f"Warning: Automated driver download failed ({e}).")
+            print("Attempting to use system-installed 'msedgedriver'...")
+            service = EdgeService() # Falls back to PATH
 
     try:
         driver = webdriver.Edge(service=service, options=options)
@@ -132,9 +158,11 @@ def fetch_config():
         print(f"\nCRITICAL ERROR launching Edge: {e}")
         print("-" * 60)
         print("TROUBLESHOOTING:")
-        print("1. Ensure Edge is COMPLETELY closed (Cmd+Q).")
+        print("1. Ensure Microsoft Edge is COMPLETELY closed (close all windows).")
         print("2. If you got a 'driver not found' error above, try installing it manually:")
-        print("   Run: brew install --cask msedgedriver")
+        print("   macOS (brew): brew install --cask msedgedriver")
+        print("   Windows: download msedgedriver from https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/")
+        print("   Or specify an existing driver with: --edge-driver \"C:\\path\\to\\msedgedriver.exe\"")
         print("-" * 60)
         return
 

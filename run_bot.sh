@@ -22,7 +22,8 @@ done
 # Validate required arguments
 if [ -z "$DISCORD_WEBHOOK_URL" ]; then
     echo "Error: --webhook <url> is required."
-    echo "Usage: ./run_bot.sh --webhook <url> --email <edge_profile_email> [--discord-user <id>] [--debug-port <port>]"
+    echo "Usage: ./run_bot.sh --webhook <url> --email <edge_profile_email> [--discord-user <id>] [--debug-port <port>] [--head] [--edge-driver <path>]"
+    echo "Example: ./run_bot.sh --webhook <webhook_url> --email <email> --discord-user \"<user_id>\" --edge-driver \"D:\\path\\msedgedriver.exe\""
     exit 1
 fi
 
