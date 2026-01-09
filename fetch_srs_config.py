@@ -158,12 +158,12 @@ def fetch_config():
     
     # Start a 55-second watchdog that will forcibly exit if we take too long
     def watchdog_timeout():
-        print("\n[TIMEOUT] Script exceeded 55 seconds. Terminating...")
-        send_discord_message("[TIMEOUT] fetch_srs_config.py exceeded 55 seconds and is terminating.", ping_user=True)
+        print("\n[TIMEOUT] Script exceeded 30 seconds. Terminating...")
+        send_discord_message("[TIMEOUT] fetch_srs_config.py exceeded 30 seconds and is terminating.", ping_user=True)
         shutdown_driver()  # Clean up Edge before exiting
         os._exit(1)  # Force exit, bypassing finally blocks
     
-    watchdog = threading.Timer(55.0, watchdog_timeout)
+    watchdog = threading.Timer(30.0, watchdog_timeout)
     watchdog.daemon = True
     watchdog.start()
     
