@@ -4,12 +4,38 @@ import sys
 import os
 import argparse
 
-# REPLACE WITH YOUR ACTUAL WEBHOOK URL
-# Now using environment variable if available
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+# Configured via CLI args
+DISCORD_WEBHOOK_URL = ""
+DISCORD_USER_ID = ""
 
 # Log buffer for accumulating messages
 LOG_BUFFER = []
+
+def _get_bot_config_path() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, "bot_config.json")
+
+def load_bot_config() -> dict:
+    """Loads shared bot_config.json. Missing/invalid config yields empty dict."""
+    path = _get_bot_config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"Warning: Failed to read bot_config.json ({e}).")
+        return {}
+    return {}
+
+def _cfg_get(cfg: dict, *keys: str, default: str = "") -> str:
+    for key in keys:
+        value = cfg.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return default
 
 def log(message):
     """Accumulates logs in memory and prints to console."""
@@ -30,10 +56,8 @@ def send_discord_buffer(ping_user=False):
     # Wrap in code block for better formatting
     content = f"```\n{full_log_text}\n```"
     
-    if ping_user:
-        discord_user_id = os.environ.get("DISCORD_USER_ID", "")
-        if discord_user_id:
-            content += f"\n<@{discord_user_id}>"
+    if ping_user and DISCORD_USER_ID:
+        content += f"\n<@{DISCORD_USER_ID}>"
 
     try:
         data = {"content": content}
@@ -87,18 +111,22 @@ def test_add_course():
     parser = argparse.ArgumentParser(description="Course Registration Bot")
     parser.add_argument("--crn", help="CRN to register")
     parser.add_argument("--term", help="Term code (e.g. 202601)")
-    parser.add_argument("--auto", action="store_true", help="Skip confirmation prompts")
+    parser.add_argument("--webhook", help="Override Discord webhook URL (otherwise uses bot_config.json)")
+    parser.add_argument("--discord-user", help="Override Discord user ID to ping (otherwise uses bot_config.json)")
     args = parser.parse_args()
 
-    # 1. Input
-    if args.crn and args.term:
-        crn = args.crn
-        term = args.term
+    global DISCORD_WEBHOOK_URL
+    global DISCORD_USER_ID
+    cfg = load_bot_config()
+    DISCORD_WEBHOOK_URL = args.webhook or _cfg_get(cfg, "webhook_url", "webhook", default="")
+    DISCORD_USER_ID = args.discord_user or _cfg_get(cfg, "discord_user_id", "discord_user", default="")
+
+    # 1. Need crn and term
+    crn = args.crn or ""
+    term = args.term or ""
+    if crn and term:
         print(f"Using CLI args - CRN: {crn}, Term: {term}")
-    else:
-        crn = input("Enter CRN to add (e.g. 11038): ").strip()
-        term = input("Enter Term (e.g. 202601): ").strip()
-    
+
     if not crn or not term:
         print("CRN and Term are required.")
         return
@@ -215,15 +243,7 @@ def test_add_course():
         batch_headers = HEADERS.copy()
         batch_headers['Content-Type'] = 'application/json'
 
-        if args.auto:
-             print(f"\nAuto-confirming submission for {crn}...")
-             confirm = 'y'
-        else:
-             confirm = input(f"\nReady to submit registration for {crn} with action {target_action_code}? (y/n): ")
-        
-        if confirm.lower() != 'y':
-            print("Aborted.")
-            return
+        print(f"\nAuto-confirming submission for {crn}...")
 
         submit_resp = requests.post(submit_url, headers=batch_headers, json=batch_payload)
         submit_resp.raise_for_status()

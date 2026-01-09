@@ -3,6 +3,8 @@ import json
 import os
 import platform
 import argparse
+import threading
+import subprocess
 import requests
 from selenium import webdriver
 from selenium.webdriver.edge.service import Service as EdgeService
@@ -13,12 +15,65 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 
-# REPLACE WITH YOUR ACTUAL WEBHOOK URL
-# Now using environment variable if available
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+# Discord webhook (configured via CLI args)
+DISCORD_WEBHOOK_URL = ""
+DISCORD_USER_ID = ""
 
 # Log buffer for accumulating messages
 LOG_BUFFER = []
+
+# Global driver reference for cleanup
+_driver = None
+
+def _get_bot_config_path() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, "bot_config.json")
+
+def load_bot_config() -> dict:
+    """Loads shared bot_config.json. Missing/invalid config yields empty dict."""
+    path = _get_bot_config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"Warning: Failed to read bot_config.json ({e}).")
+        return {}
+    return {}
+
+def _cfg_get(cfg: dict, *keys: str, default: str = "") -> str:
+    for key in keys:
+        value = cfg.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return default
+
+def cleanup_edge_processes():
+    """Kill any lingering Edge and msedgedriver processes spawned by this script."""
+    try:
+        if platform.system() == "Windows":
+            # Kill msedgedriver first, then edge processes we may have spawned
+            subprocess.run(["taskkill", "/F", "/IM", "msedgedriver.exe"], 
+                         capture_output=True, timeout=5)
+        else:
+            subprocess.run(["pkill", "-f", "msedgedriver"], 
+                         capture_output=True, timeout=5)
+    except Exception as e:
+        print(f"Warning: Could not kill msedgedriver: {e}")
+
+def shutdown_driver():
+    """Safely shut down the WebDriver and clean up processes."""
+    global _driver
+    if _driver:
+        try:
+            _driver.quit()
+        except:
+            pass
+        _driver = None
+    cleanup_edge_processes()
 
 def log(message):
     """Accumulates logs in memory and prints to console."""
@@ -42,6 +97,21 @@ def send_discord_buffer():
         requests.post(DISCORD_WEBHOOK_URL, json=data)
     except Exception as e:
         print(f"Failed to log to Discord: {e}")
+
+
+def send_discord_message(message: str, ping_user: bool = False):
+    """Send a single Discord message immediately (outside the buffered log)."""
+    if not DISCORD_WEBHOOK_URL or "YOUR_DISCORD_WEBHOOK_URL" in DISCORD_WEBHOOK_URL:
+        return
+
+    content = message
+    if ping_user and DISCORD_USER_ID:
+        content += f"\n<@{DISCORD_USER_ID}>"
+
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=10)
+    except Exception as e:
+        print(f"Failed to send Discord message: {e}")
 
 def get_edge_user_data_dir():
     home = os.path.expanduser("~")
@@ -82,12 +152,39 @@ def find_profile_directory(user_data_dir, target_email):
     return "Default"
 
 def fetch_config():
+    global _driver
+    global DISCORD_WEBHOOK_URL
+    global DISCORD_USER_ID
+    
+    # Start a 55-second watchdog that will forcibly exit if we take too long
+    def watchdog_timeout():
+        print("\n[TIMEOUT] Script exceeded 55 seconds. Terminating...")
+        send_discord_message("[TIMEOUT] fetch_srs_config.py exceeded 55 seconds and is terminating.", ping_user=True)
+        shutdown_driver()  # Clean up Edge before exiting
+        os._exit(1)  # Force exit, bypassing finally blocks
+    
+    watchdog = threading.Timer(55.0, watchdog_timeout)
+    watchdog.daemon = True
+    watchdog.start()
+    
     parser = argparse.ArgumentParser(description="SRS Config Fetcher")
     parser.add_argument("--term", help="Term to select (e.g., 'Spring 2026')")
     parser.add_argument("--debug-port", help="Port of existing Edge instance (e.g. 9222)")
     parser.add_argument("--head", action="store_true", help="Launch browser in visible (non-headless) mode")
-    parser.add_argument("--edge-driver", help="Path to msedgedriver executable (e.g. 'D:\\path\\msedgedriver.exe')")
+    parser.add_argument("--edge-driver", help="Override Edge driver path (otherwise uses bot_config.json)")
+    parser.add_argument("--email", help="Override Edge profile email (otherwise uses bot_config.json)")
+    parser.add_argument("--webhook", help="Override Discord webhook URL (otherwise uses bot_config.json)")
+    parser.add_argument("--discord-user", help="Override Discord user ID (otherwise uses bot_config.json)")
     args = parser.parse_args()
+
+    cfg = load_bot_config()
+
+    # Configure Discord logging from bot_config.json, with CLI overrides
+    DISCORD_WEBHOOK_URL = args.webhook or _cfg_get(cfg, "webhook_url", "webhook", default="")
+    DISCORD_USER_ID = args.discord_user or _cfg_get(cfg, "discord_user_id", "discord_user", default="")
+
+    # Send a startup message immediately
+    send_discord_message("[START] fetch_srs_config.py starting.", ping_user=False)
     
     # If no term is provided via args, ask for it
     target_term = args.term
@@ -98,8 +195,8 @@ def fetch_config():
     print("--- Fetching SRS Configuration ---")
     
     user_data_dir = get_edge_user_data_dir()
-    # Find the correct profile using EDGE_PROFILE_EMAIL env var, or fallback to Default
-    profile_email = os.environ.get("EDGE_PROFILE_EMAIL", "")
+    # Find the correct profile using --email, or fallback to Default
+    profile_email = args.email or _cfg_get(cfg, "email", default="")
     profile_dir = find_profile_directory(user_data_dir, profile_email) if profile_email else "Default"
     
     options = EdgeOptions()
@@ -115,8 +212,12 @@ def fetch_config():
         print("   macOS: '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge' --remote-debugging-port=9222 --user-data-dir='~/Library/Application Support/Microsoft Edge' --profile-directory='Default'")
         print("   Windows: \"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe\" --remote-debugging-port=9222 --user-data-dir=\"%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\" --profile-directory=\"Default\"")
         print("   Linux: /usr/bin/microsoft-edge --remote-debugging-port=9222 --user-data-dir=\"$HOME/.config/microsoft-edge\" --profile-directory=\"Default\"")
-        print("3. Run this bot again with: ./run_bot.sh --debug-port 9222")
-        print("4. Then start the bot with: ./run_bot.sh --webhook <webhook_url> --email <email> --discord-user \"<user_id>\"")
+        if platform.system() == "Windows":
+            print("3. Run this bot again with: .\\run_bot.bat --debug-port 9222")
+            print("4. Then start the bot with: .\\run_bot.bat --term-name \"Spring Semester 2026\" --term-code 202601 --crn 11038")
+        else:
+            print("3. Run this bot again with: ./run_bot.sh --debug-port 9222")
+            print("4. Then start the bot with: ./run_bot.sh")
         print("-" * 60 + "\n")
         
         # Default to headless unless user explicitly requested visible browser
@@ -134,13 +235,15 @@ def fetch_config():
     driver_path = None
     service = None
 
-    # If user passed a driver path, try to use it first
-    if args.edge_driver:
-        if os.path.exists(args.edge_driver):
-            print(f"Using Edge driver provided at: {args.edge_driver}")
-            service = EdgeService(args.edge_driver)
+    edge_driver_path = args.edge_driver or _cfg_get(cfg, "edge_driver", "edgeDriver", default="")
+
+    # If user (or config) provided a driver path, try to use it first
+    if edge_driver_path:
+        if os.path.exists(edge_driver_path):
+            print(f"Using Edge driver provided at: {edge_driver_path}")
+            service = EdgeService(edge_driver_path)
         else:
-            print(f"Warning: Specified Edge driver not found: {args.edge_driver}. Falling back to auto-download or PATH.")
+            print(f"Warning: Specified Edge driver not found: {edge_driver_path}. Falling back to auto-download or PATH.")
 
     if service is None:
         try:
@@ -154,6 +257,7 @@ def fetch_config():
 
     try:
         driver = webdriver.Edge(service=service, options=options)
+        _driver = driver  # Store globally for cleanup on timeout
     except Exception as e:
         print(f"\nCRITICAL ERROR launching Edge: {e}")
         print("-" * 60)
@@ -164,6 +268,7 @@ def fetch_config():
         print("   Windows: download msedgedriver from https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/")
         print("   Or specify an existing driver with: --edge-driver \"C:\\path\\to\\msedgedriver.exe\"")
         print("-" * 60)
+        send_discord_message(f"[FAIL] fetch_srs_config.py failed to launch Edge: {e}")
         return
 
     try:
@@ -350,19 +455,20 @@ def fetch_config():
         send_discord_buffer()
 
     except Exception as e:
-        error_msg = f"RUNTIME ERROR in fetch_srs_config: {e} <@480476543735431181>"
+        error_msg = f"RUNTIME ERROR in fetch_srs_config: {e}"
         log(error_msg)
         send_discord_buffer() # Send immediately on error
     finally:
-        # If we attached to an existing window, we might not want to close it?
-        # But usually 'quit' is safe.
-        try:
-            if not args.debug_port:
-                driver.quit()
-            else:
-                print("Detaching from existing browser session (window left open).")
-        except:
-             pass
+        # Cancel the watchdog timer since we're exiting normally
+        watchdog.cancel()
+        # Clean up driver and processes
+        if not args.debug_port:
+            shutdown_driver()
+        else:
+            print("Detaching from existing browser session (window left open).")
+
+        # Flush buffered logs at the end
+        send_discord_buffer()
 
 if __name__ == "__main__":
     fetch_config()

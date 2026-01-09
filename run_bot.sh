@@ -7,25 +7,10 @@ elif [ -f "venv/bin/activate" ]; then
     source venv/bin/activate
 fi
 
-# Argument parsing
-PASSTHROUGH_ARGS=()
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --webhook) export DISCORD_WEBHOOK_URL="$2"; shift ;;
-        --email) export EDGE_PROFILE_EMAIL="$2"; shift ;;
-        --discord-user) export DISCORD_USER_ID="$2"; shift ;;
-        *) PASSTHROUGH_ARGS+=("$1") ;;
-    esac
-    shift
-done
+echo "(Config) Using ./bot_config.json for webhook/user/email/edge_driver."
 
-# Validate required arguments
-if [ -z "$DISCORD_WEBHOOK_URL" ]; then
-    echo "Error: --webhook <url> is required."
-    echo "Usage: ./run_bot.sh --webhook <url> --email <edge_profile_email> [--discord-user <id>] [--debug-port <port>] [--head] [--edge-driver <path>]"
-    echo "Example: ./run_bot.sh --webhook <webhook_url> --email <email> --discord-user \"<user_id>\" --edge-driver \"D:\\path\\msedgedriver.exe\""
-    exit 1
-fi
+# Pass-through args for python scripts (e.g. --debug-port, --head)
+PASSTHROUGH_ARGS=("$@")
 
 echo "=========================================="
 echo "      Starting Course Registration Bot    "
@@ -47,7 +32,7 @@ fi
 echo ""
 echo "[Step 2] Running Registration Script..."
 echo "Target: CRN 18016, Term 202601"
-python3 test_registration.py --crn 10961 --term 202601 --auto
+python3 test_registration.py --crn 10961 --term 202601
 
 echo ""
 echo "Done."
