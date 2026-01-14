@@ -31,8 +31,8 @@ fi
 # Step 2: Run Registration
 echo ""
 echo "[Step 2] Running Registration Script..."
-echo "Target: CRN 18016, Term 202601"
-python3 test_registration.py --crn 10961 --term 202601
+echo "Using CRN list and term from bot_config.json"
+python3 test_registration.py
 
 echo ""
 echo "Done."

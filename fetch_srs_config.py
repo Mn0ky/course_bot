@@ -88,13 +88,24 @@ def send_discord_buffer():
     if not LOG_BUFFER:
         return
 
+    def _chunk_text(text: str, max_len: int) -> list[str]:
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = min(start + max_len, len(text))
+            chunks.append(text[start:end])
+            start = end
+        return chunks
+
     full_log_text = "\n".join(LOG_BUFFER)
-    # Wrap in code block for better formatting
-    content = f"```\n{full_log_text}\n```"
-    
+    # Discord message limit is ~2000 chars; reserve for code block
+    max_body = max(1, 2000 - 6)
+
     try:
-        data = {"content": content}
-        requests.post(DISCORD_WEBHOOK_URL, json=data)
+        chunks = _chunk_text(full_log_text, max_body)
+        for chunk in chunks:
+            content = f"```\n{chunk}\n```"
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
     except Exception as e:
         print(f"Failed to log to Discord: {e}")
 

@@ -52,16 +52,30 @@ def send_discord_buffer(ping_user=False):
     if not LOG_BUFFER:
         return
 
+    def _chunk_text(text: str, max_len: int) -> list[str]:
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = min(start + max_len, len(text))
+            chunks.append(text[start:end])
+            start = end
+        return chunks
+
     full_log_text = "\n".join(LOG_BUFFER)
-    # Wrap in code block for better formatting
-    content = f"```\n{full_log_text}\n```"
-    
+    # Discord message limit is ~2000 chars; reserve room for code block and ping
+    reserve = 10
     if ping_user and DISCORD_USER_ID:
-        content += f"\n<@{DISCORD_USER_ID}>"
+        reserve += len(DISCORD_USER_ID) + 5
+    max_body = max(1, 2000 - reserve)
 
     try:
-        data = {"content": content}
-        requests.post(DISCORD_WEBHOOK_URL, json=data)
+        chunks = _chunk_text(full_log_text, max_body)
+        for i, chunk in enumerate(chunks):
+            content = f"```\n{chunk}\n```"
+            # Only ping on the final chunk
+            if ping_user and DISCORD_USER_ID and i == len(chunks) - 1:
+                content += f"\n<@{DISCORD_USER_ID}>"
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
     except Exception as e:
         print(f"Failed to log to Discord: {e}")
 
@@ -109,10 +123,12 @@ BASE_URL = "https://srs-owlexpress.kennesaw.edu/StudentRegistrationSsb/ssb"
 def test_add_course():
     # Parse arguments
     parser = argparse.ArgumentParser(description="Course Registration Bot")
-    parser.add_argument("--crn", help="CRN to register")
+    parser.add_argument("--crn", help="Single CRN to register (or use --crns for multiple)")
+    parser.add_argument("--crns", help="Comma-separated list of CRNs (e.g. 10961,11038)")
     parser.add_argument("--term", help="Term code (e.g. 202601)")
     parser.add_argument("--webhook", help="Override Discord webhook URL (otherwise uses bot_config.json)")
     parser.add_argument("--discord-user", help="Override Discord user ID to ping (otherwise uses bot_config.json)")
+    parser.add_argument("--verbose", action="store_true", help="Print full batch response JSON for debugging")
     args = parser.parse_args()
 
     global DISCORD_WEBHOOK_URL
@@ -121,196 +137,209 @@ def test_add_course():
     DISCORD_WEBHOOK_URL = args.webhook or _cfg_get(cfg, "webhook_url", "webhook", default="")
     DISCORD_USER_ID = args.discord_user or _cfg_get(cfg, "discord_user_id", "discord_user", default="")
 
-    # 1. Need crn and term
-    crn = args.crn or ""
-    term = args.term or ""
-    if crn and term:
-        print(f"Using CLI args - CRN: {crn}, Term: {term}")
+    # Build CRN list from args or config
+    crn_list = []
+    if args.crns:
+        crn_list = [c.strip() for c in args.crns.split(",") if c.strip()]
+    elif args.crn:
+        crn_list = [args.crn.strip()]
+    else:
+        # Fall back to config
+        cfg_crns = cfg.get("crn_list", [])
+        if isinstance(cfg_crns, list):
+            crn_list = [str(c).strip() for c in cfg_crns if c]
+    
+    term = args.term or _cfg_get(cfg, "term", default="")
 
-    if not crn or not term:
-        print("CRN and Term are required.")
+    if crn_list and term:
+        print(f"Using CRNs: {crn_list}, Term: {term}")
+    
+    if not crn_list or not term:
+        print("CRN list and Term are required.")
+        print("Provide via --crn/--crns and --term, or configure in bot_config.json")
         return
 
-    log(f"[Step 2] Running Registration Script...\nTarget: CRN {crn}, Term {term}")
+    log(f"[Step 2] Running Registration Script...\nTarget CRNs: {', '.join(crn_list)}, Term: {term}")
 
-    print(f"\n--- Step 1: Add CRN {crn} to Cart (Summary) ---")
-    log(f"Add CRN {crn} to Cart...")
+    # =============================================
+    # Process each CRN individually (add to cart → submit → next)
+    # This prevents "duplicate section" errors when trying alternate CRNs
+    # =============================================
+    any_success = False
     
-    add_url = f"{BASE_URL}/classRegistration/addCRNRegistrationItems"
-    payload = {
-        'crnList': crn,
-        'term': term
-    }
-    
-    print(f"POST URL: {add_url}")
-    print(f"Payload: {payload}")
-    
-    try:
-        response = requests.post(add_url, headers=HEADERS, data=payload)
+    for crn in crn_list:
+        print(f"\n{'='*50}")
+        print(f"Processing CRN {crn}")
+        print(f"{'='*50}")
+        log(f"\n--- Processing CRN {crn} ---")
         
-        # Debugging: Print response content if it fails to parse
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            print("\nCRITICAL ERROR: Server did not return JSON.")
-            print(f"Status Code: {response.status_code}")
-            print(f"Response Content (First 500 chars):\n{response.text[:500]}")
-            return
-
-        response.raise_for_status()
-        
-        print("Response received.")
-        
-        # Check for success in aaData
-        # Expected structure: {"aaData": [ { "success": boolean, "model": {...}, "message": ... } ] }
-        
-        items = data.get('aaData', [])
-        if not items:
-            msg = "No data returned in aaData."
-            print(json.dumps(data, indent=2))
-            log(msg)
-            send_discord_buffer()
-            return
-
-        item = items[0]
-        
-        # Check for non-success status
-        if not item.get('success'):
-             msg = f"Add to Cart Status: Failed/Warning. Message: {item.get('message')}"
-             log(msg)
-             send_discord_buffer()
-             
-             # If no model is returned, we definitely cannot proceed
-             if not item.get('model'):
-                 return
-
-        model = item.get('model')
-        
-        if not model:
-            msg = f"Action failed or model is missing. Cannot proceed to batch submit.\nMessage: {item.get('message')}"
-            log(msg)
-            send_discord_buffer()
-            return
-
-        log("Successfully received registration model.")
-        log(f"Got model for course: {model.get('courseTitle')} ({model.get('courseReferenceNumber')})")
-
-        # 2. Find the "Web Registered" action
-        # The model contains a list of allowed actions. We need to find the one for "Register".
-        # codes are usually "RW" (Web Registered) or "RE".
-        
-        valid_actions = model.get('registrationActions', [])
-        target_action_code = None
-        
-        print("Available Actions:")
-        for action in valid_actions:
-            code = action.get('courseRegistrationStatus')
-            desc = action.get('description')
-            print(f" - {desc} (Code: {code})")
-            
-            # Heuristic to find the "Register" action
-            if "Web Registered" in desc or "Register" in desc:
-                 target_action_code = code
-
-        # If we couldn't find one, ask user or default to RW
-        if not target_action_code:
-            target_action_code = input("\nCould not auto-detect 'Register' action. Enter code manually (e.g. RW): ").strip()
-        
-        if not target_action_code:
-            print("No action selected. Aborting.")
-            return
-
-        print("\n--- Step 2: Preparing Batch Submit ---")
-        log("Preparing for Batch Submit...")
-
-        # 3. Modify model for submission
-        model['selectedAction'] = target_action_code
-        
-        # 4. Batch Submit
-        # Payload structure: { "uniqueSessionId": "...", "create": [], "update": [ model ] }
-        # Note: Added items are usually passed in 'update' if they came from addCRNRegistrationItems (which creates a temp view)
-        
-        batch_payload = {
-            "uniqueSessionId": UNIQUE_SESSION_ID,
-            "create": [],
-            "update": [model],
-            "destroy": []
+        # Step 1: Add CRN to cart
+        add_url = f"{BASE_URL}/classRegistration/addCRNRegistrationItems"
+        payload = {
+            'crnList': crn,
+            'term': term
         }
         
-        submit_url = f"{BASE_URL}/classRegistration/submitRegistration/batch"
+        print(f"POST URL: {add_url}")
+        print(f"Payload: {payload}")
         
-        # Need to switch content type for this request to JSON
-        batch_headers = HEADERS.copy()
-        batch_headers['Content-Type'] = 'application/json'
-
-        print(f"\nAuto-confirming submission for {crn}...")
-
-        submit_resp = requests.post(submit_url, headers=batch_headers, json=batch_payload)
-        submit_resp.raise_for_status()
-        
-        result_data = submit_resp.json()
-        print("\n--- Registration Result ---")
-        
-        # Parse response for errors
-        success = result_data.get('success', False)
-        message = result_data.get('message', 'No message provided')
-        print(f"Global Message: {message}")
-        print(f"Success Flag: {success}")
-
-        # Deep check for CRN specific errors
-        updates = result_data.get('data', {}).get('update', [])
-        found_errors = False
-        discord_error_log = ""
-        
-        for update_item in updates:
-            # Check crnErrors list
-            crn_errors = update_item.get('crnErrors', [])
-            if crn_errors:
-                found_errors = True
-                print(f"\n[!] Errors for CRN {update_item.get('courseReferenceNumber', 'Unknown')}:")
-                for err in crn_errors:
-                    msg = f"    - {err.get('message')} (Flag: {err.get('errorFlag')})"
-                    print(msg)
-                    discord_error_log += f"\nCRN Error: {err.get('message')}"
+        try:
+            response = requests.post(add_url, headers=HEADERS, data=payload)
             
-            # Check execution message
-            msgs = update_item.get('messages', [])
-            for msg in msgs:
-                msg_type = msg.get('type')
-                msg_text = msg.get('message')
-                if msg_type == 'error':
+            try:
+                data = response.json()
+            except json.JSONDecodeError:
+                print(f"\nCRITICAL ERROR: Server did not return JSON for CRN {crn}.")
+                print(f"Status Code: {response.status_code}")
+                print(f"Response Content (First 500 chars):\n{response.text[:500]}")
+                log(f"[ERROR] CRN {crn}: Server did not return JSON")
+                continue
+
+            response.raise_for_status()
+            
+            items = data.get('aaData', [])
+            if not items:
+                msg = f"No data returned in aaData for CRN {crn}."
+                print(json.dumps(data, indent=2))
+                log(msg)
+                continue
+
+            item = items[0]
+            
+            if not item.get('success'):
+                msg = f"CRN {crn}: {item.get('message', 'Unknown error')}"
+                log(msg)
+                print(f"[!] {msg}")
+                if not item.get('model'):
+                    continue
+
+            model = item.get('model')
+            
+            if not model:
+                log(f"CRN {crn}: Model missing, skipping")
+                continue
+
+            course_title = model.get('courseTitle', 'Unknown')
+            log(f"Got model: {course_title} ({crn})")
+
+            # Find the "Web Registered" action
+            valid_actions = model.get('registrationActions', [])
+            target_action_code = None
+            
+            print(f"Available Actions for CRN {crn}:")
+            for action in valid_actions:
+                code = action.get('courseRegistrationStatus')
+                desc = action.get('description')
+                print(f" - {desc} (Code: {code})")
+                
+                if desc and ("Web Registered" in desc or "Register" in desc):
+                    target_action_code = code
+
+            if not target_action_code:
+                target_action_code = "RW"
+                print(f"[!] Could not auto-detect register action for CRN {crn}, defaulting to 'RW'")
+            
+            model['selectedAction'] = target_action_code
+            
+            # Step 2: Immediately batch submit this single CRN
+            print(f"\n--- Submitting CRN {crn} ---")
+            log(f"Submitting {course_title} ({crn})...")
+
+            batch_payload = {
+                "uniqueSessionId": UNIQUE_SESSION_ID,
+                "create": [],
+                "update": [model],
+                "destroy": []
+            }
+            
+            submit_url = f"{BASE_URL}/classRegistration/submitRegistration/batch"
+            
+            batch_headers = HEADERS.copy()
+            batch_headers['Content-Type'] = 'application/json'
+
+            submit_resp = requests.post(submit_url, headers=batch_headers, json=batch_payload)
+            submit_resp.raise_for_status()
+            
+            result_data = submit_resp.json()
+
+            # Debug: print full response when --verbose is set
+            if args.verbose:
+                print("\n[DEBUG] Full batch response:")
+                print(json.dumps(result_data, indent=2))
+
+            success = result_data.get('success', False)
+            message = result_data.get('message', 'No message provided')
+            print(f"Global Message: {message}")
+            print(f"Success Flag: {success}")
+
+            # Check for CRN specific errors - only look at the item matching our CRN
+            updates = result_data.get('data', {}).get('update', [])
+            found_errors = False
+            found_success = False
+            
+            for update_item in updates:
+                item_crn = update_item.get('courseReferenceNumber', '')
+                # Only process the update_item for the CRN we just submitted
+                if str(item_crn) != str(crn):
+                    continue
+                
+                crn_errors = update_item.get('crnErrors', [])
+                has_crn_errors = bool(crn_errors)
+
+                # Always log/print crnErrors if present
+                if has_crn_errors:
                     found_errors = True
-                    print(f"\n[!] Error Message: {msg_text}")
-                    discord_error_log += f"\nError Msg: {msg_text}"
-                elif msg_type == 'success':
-                     print(f"\n[+] Success Message: {msg_text}")
+                    for err in crn_errors:
+                        err_msg = f"{crn}: {err.get('message')}"
+                        print(f"[!] {err_msg}")
+                        log(f"[ERROR] {err_msg}")
 
-        discord_msg = f"--- Registration Result ---\nGlobal Message: {message}\nSuccess Flag: {success}"
-        log(discord_msg)
+                # Process messages: if there are crnErrors, do NOT print/log success messages
+                msgs = update_item.get('messages', [])
+                for msg in msgs:
+                    msg_type = msg.get('type')
+                    msg_text = msg.get('message')
+                    if msg_type == 'error':
+                        found_errors = True
+                        print(f"[!] {course_title} ({crn}): {msg_text}")
+                        log(f"[ERROR] {crn}: {msg_text}")
+                    elif msg_type == 'success':
+                        if has_crn_errors:
+                            # Skip success messages when crnErrors exist (avoid misleading output)
+                            continue
+                        found_success = True
+                        print(f"[+] {course_title} ({crn}): {msg_text}")
+                        log(f"[SUCCESS] {course_title} ({crn}): {msg_text}")
 
-        if not found_errors and success:
-            print("\n[SUCCESS] Registration submitted successfully with no reported errors.")
-            log("[SUCCESS] Registration submitted successfully with no reported errors.")
-            send_discord_buffer(ping_user=True)
-        else:
-             print("\n[FAILURE] The batch submission returned 'success': false or contained errors.")
-             log(f"[FAILURE] Registration Errors:{discord_error_log}")
-             send_discord_buffer() # No ping on failure as requested
+            if not found_errors and success:
+                print(f"\n[SUCCESS] CRN {crn} registered successfully!")
+                any_success = True
+            else:
+                print(f"\n[FAILED] CRN {crn} registration failed. Trying next CRN...")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed for CRN {crn}: {e}")
+            log(f"[ERROR] CRN {crn}: Request failed - {e}")
+            continue
+        except Exception as e:
+            print(f"An error occurred for CRN {crn}: {e}")
+            log(f"[ERROR] CRN {crn}: {e}")
+            continue
+
+    # Final summary
+    print(f"\n{'='*50}")
+    print("Registration Complete")
+    print(f"{'='*50}")
+    
+    if any_success:
+        log("\n[DONE] At least one course registered successfully!")
+        send_discord_buffer(ping_user=True)  # Only ping on success
+    else:
+        log("\n[DONE] No courses were successfully registered.")
+        send_discord_buffer(ping_user=False)  # No ping on failure
         
         # Print full dump for debugging if needed
         # print(json.dumps(result_data, indent=2))
-
-    except requests.exceptions.RequestException as e:
-        print(f"Request failed: {e}")
-        log(f"RUNTIME ERROR (RequestException) in test_registration: {e}")
-        send_discord_buffer(ping_user=True)
-        if e.response:
-            print(f"Status Code: {e.response.status_code}")
-            print(f"Response: {e.response.text[:500]}")
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        log(f"RUNTIME ERROR in test_registration: {e}")
-        send_discord_buffer(ping_user=True)
 
 if __name__ == "__main__":
     test_add_course()

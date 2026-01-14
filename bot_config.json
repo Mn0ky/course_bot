@@ -2,5 +2,7 @@
   "webhook_url": "",
   "discord_user_id": "",
   "email": "",
-  "edge_driver": ""
+  "edge_driver": "",
+  "term": "202601",
+  "crn_list": []
 }
